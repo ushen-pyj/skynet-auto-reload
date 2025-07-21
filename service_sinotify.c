@@ -157,33 +157,6 @@ add_watch_recursive(struct sinotify_service *inst, const char *path) {
 	
 	skynet_error(inst->ctx, "[sinotify] Verifying watch for %s (wd=%d)\n", path, wd);
 	
-	char info_buf[256];
-	FILE *fp;
-	
-	fp = fopen("/proc/sys/fs/inotify/max_user_watches", "r");
-	if (fp) {
-		if (fgets(info_buf, sizeof(info_buf), fp)) {
-			skynet_error(inst->ctx, "[sinotify] Max user watches: %s", info_buf);
-		}
-		fclose(fp);
-	}
-	
-	fp = fopen("/proc/sys/fs/inotify/max_queued_events", "r");
-	if (fp) {
-		if (fgets(info_buf, sizeof(info_buf), fp)) {
-			skynet_error(inst->ctx, "[sinotify] Max queued events: %s", info_buf);
-		}
-		fclose(fp);
-	}
-	
-	fp = fopen("/proc/sys/fs/inotify/max_user_instances", "r");
-	if (fp) {
-		if (fgets(info_buf, sizeof(info_buf), fp)) {
-			skynet_error(inst->ctx, "[sinotify] Max user instances: %s", info_buf);
-		}
-		fclose(fp);
-	}
-	
 	DIR *dir = opendir(path);
 	if (!dir) {
 		skynet_error(inst->ctx, "[sinotify] Cannot open directory %s: %s\n", path, strerror(errno));
@@ -502,29 +475,6 @@ sinotify_service_init(struct sinotify_service * inst, struct skynet_context *ctx
 		}
 		inst->watch_dirs[i].service_count = 0;
 	}
-	
-	skynet_error(ctx, "[sinotify] === SYSTEM INOTIFY LIMITS ===\n");
-	char info_buf[256];
-	FILE *fp;
-	
-	fp = fopen("/proc/sys/fs/inotify/max_user_watches", "r");
-	if (fp && fgets(info_buf, sizeof(info_buf), fp)) {
-		skynet_error(ctx, "[sinotify] Max user watches: %s", info_buf);
-		fclose(fp);
-	}
-	
-	fp = fopen("/proc/sys/fs/inotify/max_user_instances", "r");
-	if (fp && fgets(info_buf, sizeof(info_buf), fp)) {
-		skynet_error(ctx, "[sinotify] Max user instances: %s", info_buf);
-		fclose(fp);
-	}
-	
-	fp = fopen("/proc/sys/fs/inotify/max_queued_events", "r");
-	if (fp && fgets(info_buf, sizeof(info_buf), fp)) {
-		skynet_error(ctx, "[sinotify] Max queued events: %s", info_buf);
-		fclose(fp);
-	}
-	skynet_error(ctx, "[sinotify] ================================\n");
 	
 	skynet_error(ctx, "[sinotify] Adding recursive watch for %s\n", inst->watch_path);
 	if (add_watch_recursive(inst, inst->watch_path) < 0) {
