@@ -1,5 +1,7 @@
 #include "skynet.h"
+#include "skynet_server.h"
 #include "skynet_socket.h"
+#include "skynet_timer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,13 +21,32 @@
 #define EVENT_BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
 
 #define MAX_WATCH_DIRS 1024
-#define MAX_SERVICE_ADDRS 32 
+#define MAX_SERVICE_ADDRS 32
+#define MAX_PENDING_EVENTS 256  // 最大待处理事件数
+#define DEBOUNCE_TIMEOUT 100    // 防抖超时时间(1秒 = 100 * 10ms) 
 
 struct watch_entry {
 	char *path;
 	int watch_descriptor;
 	uint32_t service_addrs[MAX_SERVICE_ADDRS]; 
 	int service_count;
+};
+
+// 待处理的事件结构
+struct pending_event {
+	char *event_name;
+	char *full_path;
+	uint32_t mask;
+	time_t timestamp;
+	struct watch_entry *watch_entry;
+};
+
+// 事件缓存结构
+struct event_cache {
+	struct pending_event events[MAX_PENDING_EVENTS];
+	int event_count;
+	uint32_t timer_session;
+	int timer_active;
 };
 
 struct sinotify_service {
@@ -35,6 +56,7 @@ struct sinotify_service {
 	char * watch_path;
 	struct watch_entry watch_dirs[MAX_WATCH_DIRS];
 	int watch_count;
+	struct event_cache cache;
 };
 
 static int sinotify_cb(struct skynet_context * context, void *ud, int type, int session, uint32_t source, const void * msg, size_t sz);
@@ -45,6 +67,14 @@ static int add_single_watch_with_callback(struct sinotify_service *inst, const c
 static void remove_all_watches(struct sinotify_service *inst);
 static int remove_service_from_watch(struct sinotify_service *inst, uint32_t service_addr);
 static void cleanup_empty_watches(struct sinotify_service *inst);
+
+// 事件缓存管理函数
+static void init_event_cache(struct event_cache *cache);
+static void clear_event_cache(struct event_cache *cache);
+static int add_event_to_cache(struct sinotify_service *inst, const char *event_name, const char *full_path, uint32_t mask, struct watch_entry *watch_entry);
+static void send_cached_events(struct sinotify_service *inst);
+static int is_duplicate_event(struct event_cache *cache, const char *full_path, uint32_t mask);
+static void start_debounce_timer(struct sinotify_service *inst);
 
 static const char*
 get_event_name(uint32_t mask) {
@@ -64,6 +94,180 @@ get_event_name(uint32_t mask) {
 	if (mask & IN_Q_OVERFLOW) return "Q_OVERFLOW";
 	if (mask & IN_IGNORED) return "IGNORED";
 	return "UNKNOWN";
+}
+
+// 初始化事件缓存
+static void
+init_event_cache(struct event_cache *cache) {
+	cache->event_count = 0;
+	cache->timer_session = 0;
+	cache->timer_active = 0;
+	for (int i = 0; i < MAX_PENDING_EVENTS; i++) {
+		cache->events[i].event_name = NULL;
+		cache->events[i].full_path = NULL;
+		cache->events[i].mask = 0;
+		cache->events[i].timestamp = 0;
+		cache->events[i].watch_entry = NULL;
+	}
+}
+
+// 清理事件缓存
+static void
+clear_event_cache(struct event_cache *cache) {
+	for (int i = 0; i < cache->event_count; i++) {
+		if (cache->events[i].event_name) {
+			skynet_free(cache->events[i].event_name);
+			cache->events[i].event_name = NULL;
+		}
+		if (cache->events[i].full_path) {
+			skynet_free(cache->events[i].full_path);
+			cache->events[i].full_path = NULL;
+		}
+		cache->events[i].mask = 0;
+		cache->events[i].timestamp = 0;
+		cache->events[i].watch_entry = NULL;
+	}
+	cache->event_count = 0;
+	cache->timer_active = 0;
+}
+
+// 检查是否为重复事件
+static int
+is_duplicate_event(struct event_cache *cache, const char *full_path, uint32_t mask) {
+	for (int i = 0; i < cache->event_count; i++) {
+		if (cache->events[i].full_path && 
+		    strcmp(cache->events[i].full_path, full_path) == 0 && 
+		    cache->events[i].mask == mask) {
+			return 1; // 找到重复事件
+		}
+	}
+	return 0; // 没有重复
+}
+
+// 启动防抖定时器
+static void
+start_debounce_timer(struct sinotify_service *inst) {
+	if (!inst->cache.timer_active) {
+		inst->cache.timer_session = skynet_timeout(skynet_context_handle(inst->ctx), DEBOUNCE_TIMEOUT, 0);
+		inst->cache.timer_active = 1;
+		skynet_error(inst->ctx, "[sinotify] Started debounce timer (session=%u)", inst->cache.timer_session);
+	}
+}
+
+// 发送缓存的事件
+static void
+send_cached_events(struct sinotify_service *inst) {
+	if (inst->cache.event_count == 0) {
+		return;
+	}
+	
+	skynet_error(inst->ctx, "[sinotify] Sending %d cached events", inst->cache.event_count);
+	
+	// 先计算所需的总长度
+	size_t total_len = 50; // "BATCH:" + 数字 + "|" 的基础长度
+	for (int i = 0; i < inst->cache.event_count; i++) {
+		struct pending_event *event = &inst->cache.events[i];
+		if (event->event_name && event->full_path) {
+			total_len += strlen(event->event_name) + strlen(event->full_path) + 2; // ":" + ";"
+		}
+	}
+	
+	// 动态分配内存
+	char *combined_msg = skynet_malloc(total_len);
+	int msg_len = 0;
+	
+	// 添加事件数量头部
+	msg_len += snprintf(combined_msg + msg_len, total_len - msg_len, "BATCH:%d|", inst->cache.event_count);
+	
+	// 添加每个事件
+	for (int i = 0; i < inst->cache.event_count; i++) {
+		struct pending_event *event = &inst->cache.events[i];
+		if (event->event_name && event->full_path && event->watch_entry) {
+			msg_len += snprintf(combined_msg + msg_len, total_len - msg_len, 
+								"%s:%s;", event->event_name, event->full_path);
+			
+			// 向所有注册的服务地址发送通知
+			for (int j = 0; j < event->watch_entry->service_count; j++) {
+				uint32_t service_addr = event->watch_entry->service_addrs[j];
+				if (service_addr != 0) {
+					skynet_error(inst->ctx, "[sinotify] Notifying service %u: %s:%s", 
+									service_addr, event->event_name, event->full_path);
+				}
+			}
+		}
+	}
+	
+	// 发送合并消息给所有相关服务
+	// 收集所有唯一的服务地址
+	uint32_t unique_services[MAX_SERVICE_ADDRS * MAX_WATCH_DIRS];
+	int unique_count = 0;
+	
+	for (int i = 0; i < inst->cache.event_count; i++) {
+		struct pending_event *event = &inst->cache.events[i];
+		if (event->watch_entry) {
+			for (int j = 0; j < event->watch_entry->service_count; j++) {
+				uint32_t service_addr = event->watch_entry->service_addrs[j];
+				if (service_addr != 0) {
+					// 检查是否已存在
+					int found = 0;
+					for (int k = 0; k < unique_count; k++) {
+						if (unique_services[k] == service_addr) {
+							found = 1;
+							break;
+						}
+					}
+					if (!found && unique_count < MAX_SERVICE_ADDRS * MAX_WATCH_DIRS) {
+						unique_services[unique_count++] = service_addr;
+					}
+				}
+			}
+		}
+	}
+	
+	// 向所有唯一服务发送合并消息
+	for (int i = 0; i < unique_count; i++) {
+		skynet_send(inst->ctx, 0, unique_services[i], PTYPE_CLIENT, 0, combined_msg, strlen(combined_msg));
+		skynet_error(inst->ctx, "[sinotify] Sent batch message to service %u: %s", unique_services[i], combined_msg);
+	}
+	
+	skynet_free(combined_msg);
+	
+	// 清理缓存
+	clear_event_cache(&inst->cache);
+}
+
+// 添加事件到缓存
+static int
+add_event_to_cache(struct sinotify_service *inst, const char *event_name, const char *full_path, uint32_t mask, struct watch_entry *watch_entry) {
+	// 检查是否为重复事件
+	if (is_duplicate_event(&inst->cache, full_path, mask)) {
+		skynet_error(inst->ctx, "[sinotify] Duplicate event ignored: %s %s", event_name, full_path);
+		return 0;
+	}
+	
+	// 检查缓存是否已满
+	if (inst->cache.event_count >= MAX_PENDING_EVENTS) {
+		skynet_error(inst->ctx, "[sinotify] Event cache full, sending cached events");
+		send_cached_events(inst);
+	}
+	
+	// 添加新事件到缓存
+	struct pending_event *event = &inst->cache.events[inst->cache.event_count];
+	event->event_name = skynet_malloc(strlen(event_name) + 1);
+	strcpy(event->event_name, event_name);
+	event->full_path = skynet_malloc(strlen(full_path) + 1);
+	strcpy(event->full_path, full_path);
+	event->mask = mask;
+	event->timestamp = time(NULL);
+	event->watch_entry = watch_entry;
+	
+	inst->cache.event_count++;
+	skynet_error(inst->ctx, "[sinotify] Added event to cache: %s %s (total: %d)", event_name, full_path, inst->cache.event_count);
+	
+	// 启动防抖定时器
+	start_debounce_timer(inst);
+	
+	return 1;
 }
 
 static int
@@ -105,7 +309,7 @@ add_single_watch_with_callback(struct sinotify_service *inst, const char *path, 
 		return -1;
 	}
 	
-	uint32_t mask = IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO;
+	uint32_t mask = IN_MODIFY;
 	skynet_error(inst->ctx, "[sinotify] Adding watch for %s with mask 0x%x\n", path, mask);
 	
 	int wd = inotify_add_watch(inst->inotify_fd, path, mask);
@@ -308,17 +512,7 @@ handle_sinotify_events(struct sinotify_service *inst, const char *buffer, int le
 			skynet_error(inst->ctx, "[sinotify] change %s: %s", event_name, event->name);
 			
 			if (watch_entry->service_count > 0) {
-				char notify_msg[PATH_MAX * 2];
-				snprintf(notify_msg, sizeof(notify_msg), "%s|%s", 
-					event_name, full_path);
-				
-				for (int i = 0; i < watch_entry->service_count; i++) {
-					uint32_t service_addr = watch_entry->service_addrs[i];
-					if (service_addr != 0) {
-						skynet_error(inst->ctx, "[sinotify] Notifying service %u: %s", service_addr, notify_msg);
-						skynet_send(inst->ctx, 0, service_addr, PTYPE_CLIENT, 0, notify_msg, strlen(notify_msg));
-					}
-				}
+				add_event_to_cache(inst, event_name, full_path, event->mask, watch_entry);
 			}
 			
 			if ((event->mask & IN_CREATE) && (event->mask & IN_ISDIR)) {
@@ -372,6 +566,16 @@ sinotify_cb(struct skynet_context * context, void *ud, int type, int session, ui
 		}
 		break;
 	}
+	case PTYPE_RESPONSE: {
+		// 检查是否是防抖定时器超时
+		if (inst->cache.timer_active && session == inst->cache.timer_session) {
+			skynet_error(context, "[sinotify] Debounce timer expired (session=%u), sending cached events", session);
+			send_cached_events(inst);
+		} else {
+			skynet_error(context, "[sinotify] Unknown timer session: %d (expected: %u)", session, inst->cache.timer_session);
+		}
+		break;
+	}
 	case PTYPE_CLIENT:
 		if (sz > 0) {
 			char *cmd = skynet_malloc(sz + 1);
@@ -416,12 +620,19 @@ sinotify_cb(struct skynet_context * context, void *ud, int type, int session, ui
 int
 sinotify_service_init(struct sinotify_service * inst, struct skynet_context *ctx, const char * parm) {
 	inst->ctx = ctx;
+	
+	// 初始化事件缓存
+	init_event_cache(&inst->cache);
+	skynet_error(ctx, "[sinotify] Event cache initialized");
+	
+	// 初始化inotify
 	inst->inotify_fd = inotify_init();
 	if (inst->inotify_fd < 0) {
 		skynet_error(ctx, "[sinotify] Failed to initialize inotify: %s", strerror(errno));
 		return 1;
 	}
 	
+	// 设置为非阻塞模式
 	int flags = fcntl(inst->inotify_fd, F_GETFL, 0);
 	if (flags == -1) {
 		skynet_error(ctx, "[sinotify] Failed to get inotify flags: %s", strerror(errno));
@@ -505,6 +716,10 @@ sinotify_create(void) {
 	inst->socket_id = -1;
 	inst->watch_path = NULL;
 	inst->watch_count = 0;
+	
+	// 初始化事件缓存
+	init_event_cache(&inst->cache);
+	
 	for (int i = 0; i < MAX_WATCH_DIRS; i++) {
 		inst->watch_dirs[i].path = NULL;
 		inst->watch_dirs[i].watch_descriptor = -1;
@@ -528,6 +743,10 @@ sinotify_release(void * inst) {
 		remove_all_watches(service);
 		close(service->inotify_fd);
 	}
+	
+	// 清理事件缓存
+	clear_event_cache(&service->cache);
+	
 	skynet_free(service->watch_path);
 	skynet_free(service);
 }
