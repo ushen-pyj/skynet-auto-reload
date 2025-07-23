@@ -17,6 +17,9 @@
 #include <fcntl.h>
 #include <dirent.h>
 
+// Debug macro - set to 1 to enable debug logging, 0 to disable
+#define DEBUG 0
+
 #define EVENT_SIZE  ( sizeof (struct inotify_event) )
 #define EVENT_BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
 
@@ -150,7 +153,7 @@ start_debounce_timer(struct sinotify_service *inst) {
 	if (!inst->cache.timer_active) {
 		inst->cache.timer_session = skynet_timeout(skynet_context_handle(inst->ctx), DEBOUNCE_TIMEOUT, 0);
 		inst->cache.timer_active = 1;
-		skynet_error(inst->ctx, "[sinotify] Started debounce timer (session=%u)", inst->cache.timer_session);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Started debounce timer (session=%u)", inst->cache.timer_session);
 	}
 }
 
@@ -161,7 +164,7 @@ send_cached_events(struct sinotify_service *inst) {
 		return;
 	}
 	
-	skynet_error(inst->ctx, "[sinotify] Sending %d cached events", inst->cache.event_count);
+	if (DEBUG) skynet_error(inst->ctx, "[sinotify] Sending %d cached events", inst->cache.event_count);
 	
 	// 先计算所需的总长度
 	size_t total_len = 50; // "BATCH:" + 数字 + "|" 的基础长度
@@ -190,7 +193,7 @@ send_cached_events(struct sinotify_service *inst) {
 			for (int j = 0; j < event->watch_entry->service_count; j++) {
 				uint32_t service_addr = event->watch_entry->service_addrs[j];
 				if (service_addr != 0) {
-					skynet_error(inst->ctx, "[sinotify] Notifying service %u: %s:%s", 
+					if (DEBUG) skynet_error(inst->ctx, "[sinotify] Notifying service %u: %s:%s", 
 									service_addr, event->event_name, event->full_path);
 				}
 			}
@@ -227,7 +230,7 @@ send_cached_events(struct sinotify_service *inst) {
 	// 向所有唯一服务发送合并消息
 	for (int i = 0; i < unique_count; i++) {
 		skynet_send(inst->ctx, 0, unique_services[i], PTYPE_CLIENT, 0, combined_msg, strlen(combined_msg));
-		skynet_error(inst->ctx, "[sinotify] Sent batch message to service %u: %s", unique_services[i], combined_msg);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Sent batch message to service %u: %s", unique_services[i], combined_msg);
 	}
 	
 	skynet_free(combined_msg);
@@ -241,13 +244,13 @@ static int
 add_event_to_cache(struct sinotify_service *inst, const char *event_name, const char *full_path, uint32_t mask, struct watch_entry *watch_entry) {
 	// 检查是否为重复事件
 	if (is_duplicate_event(&inst->cache, full_path, mask)) {
-		skynet_error(inst->ctx, "[sinotify] Duplicate event ignored: %s %s", event_name, full_path);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Duplicate event ignored: %s %s", event_name, full_path);
 		return 0;
 	}
 	
 	// 检查缓存是否已满
 	if (inst->cache.event_count >= MAX_PENDING_EVENTS) {
-		skynet_error(inst->ctx, "[sinotify] Event cache full, sending cached events");
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Event cache full, sending cached events");
 		send_cached_events(inst);
 	}
 	
@@ -262,7 +265,7 @@ add_event_to_cache(struct sinotify_service *inst, const char *event_name, const 
 	event->watch_entry = watch_entry;
 	
 	inst->cache.event_count++;
-	skynet_error(inst->ctx, "[sinotify] Added event to cache: %s %s (total: %d)", event_name, full_path, inst->cache.event_count);
+	if (DEBUG) skynet_error(inst->ctx, "[sinotify] Added event to cache: %s %s (total: %d)", event_name, full_path, inst->cache.event_count);
 	
 	// 启动防抖定时器
 	start_debounce_timer(inst);
@@ -279,10 +282,10 @@ static int
 add_single_watch_with_callback(struct sinotify_service *inst, const char *path, uint32_t service_addr) {
 	for (int i = 0; i < inst->watch_count; i++) {
 		if (inst->watch_dirs[i].path && strcmp(inst->watch_dirs[i].path, path) == 0) {
-			skynet_error(inst->ctx, "[sinotify] Path %s already being watched (wd=%d)\n", path, inst->watch_dirs[i].watch_descriptor);
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] Path %s already being watched (wd=%d)\n", path, inst->watch_dirs[i].watch_descriptor);
 			for (int j = 0; j < inst->watch_dirs[i].service_count; j++) {
 				if (inst->watch_dirs[i].service_addrs[j] == service_addr) {
-					skynet_error(inst->ctx, "[sinotify] Service %u already registered for path %s\n", service_addr, path);
+					if (DEBUG) skynet_error(inst->ctx, "[sinotify] Service %u already registered for path %s\n", service_addr, path);
 					return inst->watch_dirs[i].watch_descriptor;
 				}
 			}
@@ -290,38 +293,38 @@ add_single_watch_with_callback(struct sinotify_service *inst, const char *path, 
 			if (inst->watch_dirs[i].service_count < MAX_SERVICE_ADDRS) {
 				inst->watch_dirs[i].service_addrs[inst->watch_dirs[i].service_count] = service_addr;
 				inst->watch_dirs[i].service_count++;
-				skynet_error(inst->ctx, "[sinotify] Added service %u to existing watch for path %s (total services: %d)\n", 
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] Added service %u to existing watch for path %s (total services: %d)\n", 
 					service_addr, path, inst->watch_dirs[i].service_count);
 			} else {
-				skynet_error(inst->ctx, "[sinotify] Maximum service addresses reached for path %s\n", path);
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] Maximum service addresses reached for path %s\n", path);
 			}
 			return inst->watch_dirs[i].watch_descriptor;
 		}
 	}
 	
 	if (inst->watch_count >= MAX_WATCH_DIRS) {
-		skynet_error(inst->ctx, "[sinotify] Maximum watch directories reached (%d)\n", MAX_WATCH_DIRS);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Maximum watch directories reached (%d)\n", MAX_WATCH_DIRS);
 		return -1;
 	}
 	struct stat st;
 	if (stat(path, &st) != 0) {
-		skynet_error(inst->ctx, "[sinotify] Cannot access path %s: %s\n", path, strerror(errno));
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Cannot access path %s: %s\n", path, strerror(errno));
 		return -1;
 	}
 	
 	uint32_t mask = IN_MODIFY;
-	skynet_error(inst->ctx, "[sinotify] Adding watch for %s with mask 0x%x\n", path, mask);
+	if (DEBUG) skynet_error(inst->ctx, "[sinotify] Adding watch for %s with mask 0x%x\n", path, mask);
 	
 	int wd = inotify_add_watch(inst->inotify_fd, path, mask);
 	
 	if (wd < 0) {
-		skynet_error(inst->ctx, "[sinotify] FAILED to add watch for %s: %s (errno=%d)\n", path, strerror(errno), errno);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] FAILED to add watch for %s: %s (errno=%d)\n", path, strerror(errno), errno);
 		if (errno == ENOSPC) {
-			skynet_error(inst->ctx, "[sinotify] ERROR: inotify watch limit reached. Check /proc/sys/fs/inotify/max_user_watches\n");
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] ERROR: inotify watch limit reached. Check /proc/sys/fs/inotify/max_user_watches\n");
 		} else if (errno == ENOMEM) {
-			skynet_error(inst->ctx, "[sinotify] ERROR: Insufficient memory\n");
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] ERROR: Insufficient memory\n");
 		} else if (errno == EACCES) {
-			skynet_error(inst->ctx, "[sinotify] ERROR: Permission denied for %s\n", path);
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] ERROR: Permission denied for %s\n", path);
 		}
 		return -1;
 	}
@@ -337,7 +340,7 @@ add_single_watch_with_callback(struct sinotify_service *inst, const char *path, 
 	inst->watch_dirs[inst->watch_count].service_count = (service_addr != 0) ? 1 : 0;
 	inst->watch_count++;
 	
-	skynet_error(inst->ctx, "[sinotify] SUCCESS: Added watch for %s (wd=%d, total=%d)\n", path, wd, inst->watch_count);
+	if (DEBUG) skynet_error(inst->ctx, "[sinotify] SUCCESS: Added watch for %s (wd=%d, total=%d)\n", path, wd, inst->watch_count);
 	return wd;
 }
 
@@ -345,12 +348,12 @@ static int
 add_watch_recursive(struct sinotify_service *inst, const char *path) {
 	struct stat st;
 	if (stat(path, &st) != 0) {
-		skynet_error(inst->ctx, "[sinotify] Cannot access %s: %s\n", path, strerror(errno));
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Cannot access %s: %s\n", path, strerror(errno));
 		return -1;
 	}
 	
 	if (!S_ISDIR(st.st_mode)) {
-		skynet_error(inst->ctx, "[sinotify] %s is not a directory\n", path);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] %s is not a directory\n", path);
 		return -1;
 	}
 	
@@ -359,11 +362,11 @@ add_watch_recursive(struct sinotify_service *inst, const char *path) {
 		return -1;
 	}
 	
-	skynet_error(inst->ctx, "[sinotify] Verifying watch for %s (wd=%d)\n", path, wd);
+	if (DEBUG) skynet_error(inst->ctx, "[sinotify] Verifying watch for %s (wd=%d)\n", path, wd);
 	
 	DIR *dir = opendir(path);
 	if (!dir) {
-		skynet_error(inst->ctx, "[sinotify] Cannot open directory %s: %s\n", path, strerror(errno));
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Cannot open directory %s: %s\n", path, strerror(errno));
 		return -1;
 	}
 	
@@ -398,7 +401,7 @@ remove_all_watches(struct sinotify_service *inst) {
 	for (int i = 0; i < inst->watch_count; i++) {
 		if (inst->watch_dirs[i].watch_descriptor >= 0) {
 			inotify_rm_watch(inst->inotify_fd, inst->watch_dirs[i].watch_descriptor);
-			skynet_error(inst->ctx, "[sinotify] Removed watch for %s (wd=%d)\n", 
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] Removed watch for %s (wd=%d)\n", 
 				inst->watch_dirs[i].path, inst->watch_dirs[i].watch_descriptor);
 		}
 		if (inst->watch_dirs[i].path) {
@@ -426,7 +429,7 @@ remove_service_from_watch(struct sinotify_service *inst, uint32_t service_addr) 
 				inst->watch_dirs[i].service_addrs[inst->watch_dirs[i].service_count - 1] = 0;
 				inst->watch_dirs[i].service_count--;
 				removed_count++;
-				skynet_error(inst->ctx, "[sinotify] Removed service %u from watch %s (remaining services: %d)\n", 
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] Removed service %u from watch %s (remaining services: %d)\n", 
 					service_addr, inst->watch_dirs[i].path, inst->watch_dirs[i].service_count);
 				j--;
 			}
@@ -441,8 +444,8 @@ cleanup_empty_watches(struct sinotify_service *inst) {
 		if (inst->watch_dirs[i].service_count == 0) {
 			if (inst->watch_dirs[i].watch_descriptor >= 0) {
 				inotify_rm_watch(inst->inotify_fd, inst->watch_dirs[i].watch_descriptor);
-				skynet_error(inst->ctx, "[sinotify] Removed empty watch for %s (wd=%d)\n", 
-					inst->watch_dirs[i].path, inst->watch_dirs[i].watch_descriptor);
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] Removed empty watch for %s (wd=%d)\n", 
+				inst->watch_dirs[i].path, inst->watch_dirs[i].watch_descriptor);
 			}
 			
 			if (inst->watch_dirs[i].path) {
@@ -479,7 +482,7 @@ find_watch_entry(struct sinotify_service *inst, int wd) {
 void
 handle_sinotify_events(struct sinotify_service *inst, const char *buffer, int length) {
 	if (length <= 0) {
-		skynet_error(inst->ctx, "[sinotify] Invalid data length: %d\n", length);
+		if (DEBUG) skynet_error(inst->ctx, "[sinotify] Invalid data length: %d\n", length);
 		return;
 	}
 	int i = 0;
@@ -488,7 +491,7 @@ handle_sinotify_events(struct sinotify_service *inst, const char *buffer, int le
 		
 		struct watch_entry *watch_entry = find_watch_entry(inst, event->wd);
 		if (!watch_entry) {
-			skynet_error(inst->ctx, "[sinotify] Unknown watch descriptor: %d", event->wd);
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] Unknown watch descriptor: %d", event->wd);
 			i += EVENT_SIZE + event->len;
 			continue;
 		}
@@ -509,18 +512,18 @@ handle_sinotify_events(struct sinotify_service *inst, const char *buffer, int le
 		
 		if (event->len > 0) {
 			const char* event_name = get_event_name(event->mask);
-			skynet_error(inst->ctx, "[sinotify] change %s: %s", event_name, event->name);
+			if (DEBUG) skynet_error(inst->ctx, "[sinotify] change %s: %s", event_name, event->name);
 			
 			if (watch_entry->service_count > 0) {
 				add_event_to_cache(inst, event_name, full_path, event->mask, watch_entry);
 			}
 			
 			if ((event->mask & IN_CREATE) && (event->mask & IN_ISDIR)) {
-				skynet_error(inst->ctx, "[sinotify] New directory created, adding recursive watch: %s", full_path);
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] New directory created, adding recursive watch: %s", full_path);
 				add_watch_recursive(inst, full_path);
 			}
 			if ((event->mask & IN_MOVED_TO) && (event->mask & IN_ISDIR)) {
-				skynet_error(inst->ctx, "[sinotify] Directory moved in, adding recursive watch: %s", full_path);
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] Directory moved in, adding recursive watch: %s", full_path);
 				add_watch_recursive(inst, full_path);
 			}
 		}
@@ -532,35 +535,35 @@ handle_sinotify_events(struct sinotify_service *inst, const char *buffer, int le
 static int
 sinotify_cb(struct skynet_context * context, void *ud, int type, int session, uint32_t source, const void * msg, size_t sz) {
 	struct sinotify_service * inst = (struct sinotify_service *)ud;
-	skynet_error(context, "[sinotify] callback type: %d, session: %d, source: %u, sz: %zu", type, session, source, sz);
+	if (DEBUG) skynet_error(context, "[sinotify] callback type: %d, session: %d, source: %u, sz: %zu", type, session, source, sz);
 	switch (type) {
 	case PTYPE_SOCKET: {
 		struct skynet_socket_message * socket_msg = (struct skynet_socket_message *)msg;
-		skynet_error(context, "[sinotify] socket type: %d, id: %d", socket_msg->type, socket_msg->id);
+		if (DEBUG) skynet_error(context, "[sinotify] socket type: %d, id: %d", socket_msg->type, socket_msg->id);
 		
 		if (socket_msg->id == inst->socket_id) {
 			switch (socket_msg->type) {
 			case SKYNET_SOCKET_TYPE_CONNECT:
-				skynet_error(inst->ctx, "[sinotify] socket connected");
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] socket connected");
 				break;
 			case SKYNET_SOCKET_TYPE_DATA:
-				skynet_error(inst->ctx, "[sinotify] Received SKYNET_SOCKET_TYPE_DATA message, size=%d", socket_msg->ud);
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] Received SKYNET_SOCKET_TYPE_DATA message, size=%d", socket_msg->ud);
 				
 				if (socket_msg->buffer && socket_msg->ud > 0) {
 					handle_sinotify_events(inst, socket_msg->buffer, socket_msg->ud);
 					skynet_free(socket_msg->buffer);
 				} else {
-					skynet_error(inst->ctx, "[sinotify] No data in socket message");
+					if (DEBUG) skynet_error(inst->ctx, "[sinotify] No data in socket message");
 				}
 				break;
 			case SKYNET_SOCKET_TYPE_ERROR: 
-				skynet_error(inst->ctx, "[sinotify] socket error occurred");
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] socket error occurred");
 				break;
 			case SKYNET_SOCKET_TYPE_CLOSE: 
-				skynet_error(inst->ctx, "[sinotify] socket closed");
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] socket closed");
 				break;
 			default:
-				skynet_error(inst->ctx, "[sinotify] unknown socket message type: %d", socket_msg->type);
+				if (DEBUG) skynet_error(inst->ctx, "[sinotify] unknown socket message type: %d", socket_msg->type);
 				break;
 			}
 		}
@@ -569,10 +572,10 @@ sinotify_cb(struct skynet_context * context, void *ud, int type, int session, ui
 	case PTYPE_RESPONSE: {
 		// 检查是否是防抖定时器超时
 		if (inst->cache.timer_active && session == inst->cache.timer_session) {
-			skynet_error(context, "[sinotify] Debounce timer expired (session=%u), sending cached events", session);
+			if (DEBUG) skynet_error(context, "[sinotify] Debounce timer expired (session=%u), sending cached events", session);
 			send_cached_events(inst);
 		} else {
-			skynet_error(context, "[sinotify] Unknown timer session: %d (expected: %u)", session, inst->cache.timer_session);
+			if (DEBUG) skynet_error(context, "[sinotify] Unknown timer session: %d (expected: %u)", session, inst->cache.timer_session);
 		}
 		break;
 	}
@@ -581,32 +584,32 @@ sinotify_cb(struct skynet_context * context, void *ud, int type, int session, ui
 			char *cmd = skynet_malloc(sz + 1);
 			memcpy(cmd, msg, sz);
 			cmd[sz] = '\0';
-			skynet_error(context, "[sinotify] Received command: %s", cmd);
+			if (DEBUG) skynet_error(context, "[sinotify] Received command: %s", cmd);
 			if (strncmp(cmd, "stop", 4) == 0) {
-				skynet_error(context, "[sinotify] Received stop command from service %u", source);
+				if (DEBUG) skynet_error(context, "[sinotify] Received stop command from service %u", source);
 				int removed = remove_service_from_watch(inst, source);
 				if (removed > 0) {
-					skynet_error(context, "[sinotify] Removed service %u from %d watches", source, removed);
+					if (DEBUG) skynet_error(context, "[sinotify] Removed service %u from %d watches", source, removed);
 					cleanup_empty_watches(inst);
-					skynet_error(context, "[sinotify] Cleaned up empty watches, remaining watches: %d", inst->watch_count);
+					if (DEBUG) skynet_error(context, "[sinotify] Cleaned up empty watches, remaining watches: %d", inst->watch_count);
 				} else {
-					skynet_error(context, "[sinotify] Service %u was not registered for any watches", source);
+					if (DEBUG) skynet_error(context, "[sinotify] Service %u was not registered for any watches", source);
 				}
 			} else if (strncmp(cmd, "add_watch", 9) == 0) {
 				char *params = cmd + 9; 
-				skynet_error(context, "[sinotify] add_watch %s", params);
+				if (DEBUG) skynet_error(context, "[sinotify] add_watch %s", params);
 				if (params) {
 					int wd = add_single_watch_with_callback(inst, params, source);
 					if (wd >= 0) {
-						skynet_error(context, "[sinotify] Added watch for %s with callback %d", params, source);
+						if (DEBUG) skynet_error(context, "[sinotify] Added watch for %s with callback %d", params, source);
 					} else {
-						skynet_error(context, "[sinotify] Failed to add watch for %s", params);
+						if (DEBUG) skynet_error(context, "[sinotify] Failed to add watch for %s", params);
 					}
 				} else {
-					skynet_error(context, "[sinotify] Invalid add_watch command format. Usage: add_watch watch_path %s", params);
+					if (DEBUG) skynet_error(context, "[sinotify] Invalid add_watch command format. Usage: add_watch watch_path %s", params);
 				}
 			} else {
-				skynet_error(context, "[sinotify] Unknown command: %s (available: stop, add_watch)", cmd);
+				if (DEBUG) skynet_error(context, "[sinotify] Unknown command: %s (available: stop, add_watch)", cmd);
 			}
 			
 			skynet_free(cmd);
@@ -623,57 +626,57 @@ sinotify_service_init(struct sinotify_service * inst, struct skynet_context *ctx
 	
 	// 初始化事件缓存
 	init_event_cache(&inst->cache);
-	skynet_error(ctx, "[sinotify] Event cache initialized");
+	if (DEBUG) skynet_error(ctx, "[sinotify] Event cache initialized");
 	
 	// 初始化inotify
 	inst->inotify_fd = inotify_init();
 	if (inst->inotify_fd < 0) {
-		skynet_error(ctx, "[sinotify] Failed to initialize inotify: %s", strerror(errno));
+		if (DEBUG) skynet_error(ctx, "[sinotify] Failed to initialize inotify: %s", strerror(errno));
 		return 1;
 	}
 	
 	// 设置为非阻塞模式
 	int flags = fcntl(inst->inotify_fd, F_GETFL, 0);
 	if (flags == -1) {
-		skynet_error(ctx, "[sinotify] Failed to get inotify flags: %s", strerror(errno));
+		if (DEBUG) skynet_error(ctx, "[sinotify] Failed to get inotify flags: %s", strerror(errno));
 		close(inst->inotify_fd);
 		return 1;
 	}
 	if (fcntl(inst->inotify_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-		skynet_error(ctx, "[sinotify] Failed to set inotify non-blocking: %s", strerror(errno));
+		if (DEBUG) skynet_error(ctx, "[sinotify] Failed to set inotify non-blocking: %s", strerror(errno));
 		close(inst->inotify_fd);
 		return 1;
 	}
 	
-	skynet_error(ctx, "[sinotify] Service initialized successfully");
+	if (DEBUG) skynet_error(ctx, "[sinotify] Service initialized successfully");
 	
 	if (parm && strlen(parm) > 0) {
 		inst->watch_path = skynet_malloc(strlen(parm) + 1);
 		strcpy(inst->watch_path, parm);
 	} else {
-		skynet_error(ctx, "[sinotify] No directory specified, using current directory");
+		if (DEBUG) skynet_error(ctx, "[sinotify] No directory specified, using current directory");
 		inst->watch_path = skynet_malloc(PATH_MAX);
 		if (getcwd(inst->watch_path, PATH_MAX) == NULL) {
-			skynet_error(ctx, "[sinotify] Failed to get current directory: %s", strerror(errno));
+			if (DEBUG) skynet_error(ctx, "[sinotify] Failed to get current directory: %s", strerror(errno));
 			return 1;
 		}
 	}
 	
 	char *abs_path = realpath(inst->watch_path, NULL);
 	if (abs_path) {
-		skynet_error(ctx, "[sinotify] Absolute path to watch: %s", abs_path);
+		if (DEBUG) skynet_error(ctx, "[sinotify] Absolute path to watch: %s", abs_path);
 		free(abs_path);
 	} else {
-		skynet_error(ctx, "[sinotify] Warning: cannot resolve absolute path for %s: %s", inst->watch_path, strerror(errno));
+		if (DEBUG) skynet_error(ctx, "[sinotify] Warning: cannot resolve absolute path for %s: %s", inst->watch_path, strerror(errno));
 	}
 	
 	struct stat st;
 	if (stat(inst->watch_path, &st) != 0) {
-		skynet_error(ctx, "[sinotify] Error: cannot access directory %s: %s", inst->watch_path, strerror(errno));
+		if (DEBUG) skynet_error(ctx, "[sinotify] Error: cannot access directory %s: %s", inst->watch_path, strerror(errno));
 		return 1;
 	}
 	if (!S_ISDIR(st.st_mode)) {
-		skynet_error(ctx, "[sinotify] Error: %s is not a directory", inst->watch_path);
+		if (DEBUG) skynet_error(ctx, "[sinotify] Error: %s is not a directory", inst->watch_path);
 		return 1;
 	}
 	
@@ -687,24 +690,24 @@ sinotify_service_init(struct sinotify_service * inst, struct skynet_context *ctx
 		inst->watch_dirs[i].service_count = 0;
 	}
 	
-	skynet_error(ctx, "[sinotify] Adding recursive watch for %s\n", inst->watch_path);
+	if (DEBUG) skynet_error(ctx, "[sinotify] Adding recursive watch for %s\n", inst->watch_path);
 	if (add_watch_recursive(inst, inst->watch_path) < 0) {
-		skynet_error(ctx, "[sinotify] Failed to add recursive watch for %s\n", inst->watch_path);
+		if (DEBUG) skynet_error(ctx, "[sinotify] Failed to add recursive watch for %s\n", inst->watch_path);
 		return 1;
 	}
-	skynet_error(ctx, "[sinotify] Started watching directory recursively: %s (total watches=%d)\n", inst->watch_path, inst->watch_count);
+	if (DEBUG) skynet_error(ctx, "[sinotify] Started watching directory recursively: %s (total watches=%d)\n", inst->watch_path, inst->watch_count);
 	
 	skynet_callback(ctx, inst, sinotify_cb);
 	
 	inst->socket_id = skynet_socket_bind(ctx, inst->inotify_fd);
 	if (inst->socket_id < 0) {
-		skynet_error(ctx, "[sinotify] Failed to bind inotify fd to skynet socket");
+		if (DEBUG) skynet_error(ctx, "[sinotify] Failed to bind inotify fd to skynet socket");
 		return 1;
 	}
 	
 	skynet_socket_start(ctx, inst->socket_id);
 	
-	skynet_error(ctx, "[sinotify] Service initialized successfully, socket_id=%d", inst->socket_id);
+	if (DEBUG) skynet_error(ctx, "[sinotify] Service initialized successfully, socket_id=%d", inst->socket_id);
 	return 0;
 }
 
@@ -728,7 +731,7 @@ sinotify_create(void) {
 		}
 		inst->watch_dirs[i].service_count = 0;
 	}
-	skynet_error(inst->ctx, "[sinotify] Service created\n");
+	if (DEBUG && inst->ctx) skynet_error(inst->ctx, "[sinotify] Service created\n");
 	return inst;
 }
 
