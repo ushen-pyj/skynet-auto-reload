@@ -10,9 +10,10 @@ lua服务调用add_watch 监听目录, 文件发生变化后会回调到lua服�
 skynet.send(sinotify, "client", "add_watch", "./test")
 ```
 
-在实例中, 修改mymod文件, 文件变化后会打印日志
-修改version打印
-以及show函数
+在示例中, 修改mymod文件:
+修改version打印 version: 2
+以及show函数 返回 OLD2
+文件变化后会打印日志
 
 ```lua
 [:0100000f] [inotify] Raw message: BATCH:1|MODIFY:./test/mymod.lua;
