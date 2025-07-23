@@ -4,7 +4,7 @@
 
 具体如何启动这里不多说
 
-lua服务调用add_watch 监听目录, 文件发生变化后会回调到lua服务, 默认忽略.开头的文件
+lua服务调用add_watch 监听目录, 文件发生变化后会回调到lua服务, 默认忽略.开头的目录
 
 ```lua
 skynet.send(sinotify, "client", "add_watch", "./test")
