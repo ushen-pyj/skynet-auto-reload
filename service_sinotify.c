@@ -579,7 +579,7 @@ sinotify_cb(struct skynet_context * context, void *ud, int type, int session, ui
 		}
 		break;
 	}
-	case PTYPE_CLIENT:
+	case PTYPE_TEXT:
 		if (sz > 0) {
 			char *cmd = skynet_malloc(sz + 1);
 			memcpy(cmd, msg, sz);

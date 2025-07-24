@@ -1,6 +1,6 @@
 local skynet = require "skynet"
-local reload = require "test.reload"
-local mymod = require "test.mymod"
+local reload = require "luareload.reload"
+local mymod = require "luareload.mymod"
 
 
 reload.print = function (...)
@@ -65,6 +65,13 @@ local function parse_inotify_events(msg)
 end
 
 skynet.register_protocol({
+	name = "text",
+	id = skynet.PTYPE_TEXT,
+	pack = function(...) return table.concat({...}, "") end,
+	unpack = skynet.tostring,
+})
+
+skynet.register_protocol({
 	name = "client",
 	id = skynet.PTYPE_CLIENT,
 	pack = function(...) return table.concat({...}, "") end,
@@ -103,5 +110,5 @@ skynet.register_protocol({
 
 skynet.start(function()
 	local sinotify = skynet.localname(".sinotify")
-	skynet.send(sinotify, "client", "add_watch", "./test")
+	skynet.send(sinotify, "text", "add_watch", "./lualib/luareload")
 end)
